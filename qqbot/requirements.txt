@@ -1,0 +1,2 @@
+# QQ 机器人额外依赖（核心上传用仓库根目录的 requirements.txt）。
+easybot-qq>=1.0.4

@@ -1,0 +1,29 @@
+# hustrun 桌面模式配置示例。
+# 复制为 config.yaml 后按需修改；config.yaml 已被 .gitignore 忽略。
+
+paths:
+  # 登录后写入的本地凭证文件（由 `python -m hustrun login` 创建）。
+  header_xml: ".credentials/HEADER.xml"
+  userinfo_xml: "../spprefs/spprefs/USERINFO.xml"
+  school_xml: "../spprefs/spprefs/SCHOOL.xml"
+  json_path: "../sport_2026-06-20.json"
+
+upload:
+  # HUST 1.0.9 抓包确认：AES/ECB/PKCS7 后 Base64。
+  aes_encoding: "base64"
+  token_header: "cgAuthorization"
+  # 默认上传一份合成的传感器数据；如需跳过可加 --skip-sensor。
+  skip_sensor: false
+
+device:
+  # 与登录/签名所用的真实设备一致（取自经授权的 HAR）。
+  imei: "00000000-0000-0000-0000-000000000000"
+  user_agent: "hzkjapp/1.0.9(Linux;Android 15;OnePlus/TP1A.220905.001)"
+  # v1 = MD5(seed)；留空时对当前毫秒时间做 MD5。
+  v1_seed: ""
+  is_root: false
+  phone_version: "PJE110,35,15|1.0.9"
+
+# 动态签名器完全在 Python 里算：不读 APK/.so、不启动 JVM，因此这里没有
+# signer 配置项。
+

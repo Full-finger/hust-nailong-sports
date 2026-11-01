@@ -1,0 +1,24 @@
+[Unit]
+Description=HUST sports daily upload (pure Python, multi-user)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=hustrun
+Group=hustrun
+WorkingDirectory=/opt/hustrun
+Environment=PYTHONUNBUFFERED=1
+Environment=TZ=Asia/Shanghai
+# 目录布局默认就是仓库本身；换成别的布局时打开下面几行
+#Environment=HUSTRUN_ROOT=/opt/hustrun
+#Environment=HUSTRUN_APP_DIR=/opt/hustrun/app
+#Environment=HUSTRUN_USERS_FILE=/opt/hustrun/qqbot/users.json
+#Environment=HUSTRUN_LOG_DIR=/var/log/hustrun
+#Environment=HUSTRUN_PYTHON=/opt/hustrun/venv/bin/python
+ExecStartPre=/usr/bin/mkdir -p /opt/hustrun/logs /opt/hustrun/logs/users
+ExecStart=/usr/bin/flock -n /opt/hustrun/logs/upload.lock /opt/hustrun/venv/bin/python /opt/hustrun/qqbot/daily_upload.py
+TimeoutStartSec=3600
+Nice=5
+StandardOutput=append:/opt/hustrun/logs/upload.log
+StandardError=append:/opt/hustrun/logs/upload.log

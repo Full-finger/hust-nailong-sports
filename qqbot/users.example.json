@@ -1,0 +1,29 @@
+{
+  "version": 2,
+  "owner": "OPENID_OF_OWNER",
+  "users": {
+    "OPENID_OF_OWNER": {
+      "label": "owner",
+      "account": "",
+      "role": "owner",
+      "home": "/opt/hustrun/users/OPENID_OF_OWNER",
+      "config": "/opt/hustrun/users/OPENID_OF_OWNER/config.yaml",
+      "route": "/opt/hustrun/users/OPENID_OF_OWNER/route.json",
+      "log": "/var/log/hustrun/users/OPENID_OF_OWNER.log",
+      "daily": true,
+      "bound_at": "2026-10-26 13:30:00"
+    },
+    "OPENID_OF_FRIEND": {
+      "label": "朋友",
+      "account": "",
+      "role": "user",
+      "home": "/opt/hustrun/users/OPENID_OF_FRIEND",
+      "config": "/opt/hustrun/users/OPENID_OF_FRIEND/config.yaml",
+      "route": "/opt/hustrun/users/OPENID_OF_FRIEND/route.json",
+      "log": "/var/log/hustrun/users/OPENID_OF_FRIEND.log",
+      "daily": true,
+      "bound_at": "2026-10-26 21:54:36"
+    }
+  },
+  "invites": {}
+}

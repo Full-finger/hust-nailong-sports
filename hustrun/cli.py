@@ -1,0 +1,309 @@
+"""命令行入口：login / check / generate / upload。"""
+
+from __future__ import annotations
+
+import json
+import os
+import shutil
+import sys
+import tempfile
+from pathlib import Path
+
+import click
+
+from .config import get_data_paths, load_auth_config
+from .pipeline import (
+    UploadOptions,
+    check_session,
+    upload_route,
+)
+
+
+def _configure_console() -> None:
+    """Windows 旧代码页无法显示符号时用替换字符，避免 CLI 崩溃。"""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure:
+            try:
+                reconfigure(encoding="utf-8", errors="replace")
+            except (ValueError, OSError):
+                pass
+
+
+_configure_console()
+
+
+def _prompt_captcha(image: bytes, suffix: str) -> str:
+    path = ""
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="wb", prefix="hustrun_captcha_", suffix=suffix, delete=False
+        ) as file:
+            file.write(image)
+            path = file.name
+        click.echo(f"\n[登录] 图形验证码: {path}")
+        startfile = getattr(os, "startfile", None)
+        if startfile is not None:
+            try:
+                startfile(path)
+            except OSError:
+                pass
+        return click.prompt("验证码", type=str).strip()
+    finally:
+        if path:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+
+
+def _prompt_dynamic_code(message: str) -> str:
+    click.echo(f"\n[登录] {message}")
+    return click.prompt("企业微信动态验证码", type=str).strip()
+
+
+def _emit_result(result) -> int:
+    """打印上传结论并给出退出码：0 有效 / 2 被判无效 / 1 请求失败。"""
+    if result.success and result.is_valid == "1":
+        click.echo(
+            f"✓ 提交成功 sportId={result.sport_id} "
+            f"checkStatus={result.check_status} tip={result.tip}"
+        )
+        return 0
+    if result.success:
+        click.echo(
+            f"✗ 服务端判定无效 isValid={result.is_valid} "
+            f"reason={result.in_valid_reason} tip={result.tip}"
+        )
+        return 2
+    click.echo(f"✗ 上传失败: {result.raw_response}", err=True)
+    return 1
+
+
+@click.group()
+@click.version_option("1.0.0", prog_name="hustrun")
+def main() -> None:
+    """HUST 校园跑 · 桌面一键上传（无需手机/模拟器）。"""
+
+
+@main.command()
+@click.option("--config", "-c", default="config.yaml")
+@click.option("--username", "-u", default=None, help="学号（默认读 USERINFO.xml）")
+@click.option("--password", "-p", default=None, help="密码（建议省略，交互输入）")
+@click.option("--debug", is_flag=True, help="显示 CAS 重定向链")
+def login(config: str, username: str | None, password: str | None, debug: bool) -> None:
+    """CAS 登录并更新本地凭证文件。"""
+    from getpass import getpass
+
+    from .cas_login import cas_login, update_header_xml
+
+    auth = load_auth_config(config)
+    paths = get_data_paths(config)
+    header_path = Path(paths["header_xml"])
+
+    # 首次登录时把现有的授权抓包复制成本地凭证文件，避免改动其他项目的文件。
+    if not header_path.exists():
+        fallback = Path(__file__).resolve().parent.parent / ".." / "spprefs" / "spprefs" / "HEADER.xml"
+        if fallback.is_file():
+            header_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(fallback, header_path)
+            click.echo(f"[登录] 已复制初始凭证: {header_path}")
+
+    username = username or auth.xh or click.prompt("用户名/学号", type=str)
+    password = password or getpass("密码: ")
+    if not username or not password:
+        raise click.ClickException("用户名和密码不能为空")
+
+    click.echo(f"[登录] 服务端: {auth.server_url}")
+    result = cas_login(
+        server_url=auth.server_url,
+        username=username,
+        password=password,
+        captcha_callback=_prompt_captcha,
+        dynamic_code_callback=_prompt_dynamic_code,
+    )
+    if not result.success:
+        click.echo(f"✗ CAS 登录失败: {result.error}", err=True)
+        if "403" in result.error:
+            click.echo(
+                "  说明: 学校 WAF 拦截了本次请求（常见于短时间重复登录）。"
+                "请等待 10–30 分钟，或换一个网络（如手机热点）后重试；"
+                "不要连续重试，否则封禁时间会延长。",
+                err=True,
+            )
+        if debug:
+            for item in result.trace:
+                click.echo(f"  {item}", err=True)
+        raise SystemExit(1)
+
+    click.echo("✓ 登录成功（TOKEN/SECRET 不在终端显示）")
+    if not header_path.exists():
+        raise click.ClickException(f"凭证文件不存在，无法写入: {header_path}")
+    update_header_xml(str(header_path), result, backup=True)
+    click.echo(f"✓ 凭证已更新: {header_path}")
+
+
+@main.command()
+@click.option("--config", "-c", default="config.yaml")
+def check(config: str) -> None:
+    """签名器 + 会话自检（只读，不会改动服务端）。"""
+    auth = load_auth_config(config)
+    click.echo(f"[配置] 学号: {auth.xh}  服务端: {auth.server_url}")
+    click.echo(
+        f"[配置] TOKEN {'已配置' if auth.token else '缺失'} "
+        f"({len(auth.token)} 字符), "
+        f"SECRET {'已配置' if auth.secret else '缺失'}, "
+        f"过期={auth.is_token_expired}"
+    )
+    try:
+        report = check_session(config, progress=click.echo)
+    except Exception as exc:  # noqa: BLE001 - CLI 边界
+        click.echo(f"✗ 自检失败: {exc}", err=True)
+        raise SystemExit(1)
+    click.echo(json.dumps(report, ensure_ascii=False, indent=2, default=str))
+    raise SystemExit(0 if report.get("ok") else 1)
+
+
+@main.command()
+@click.option("--config", "-c", default="config.yaml")
+@click.option("--route", "-r", "route_path", required=True, help="路径 JSON")
+@click.option("--distance", "-d", type=float, default=2150.0, help="目标距离（米）")
+@click.option("--seed", type=int, default=None)
+@click.option("--out", "output", default=None, help="把明文 payload 写到文件")
+def generate(
+    config: str,
+    route_path: str,
+    distance: float,
+    seed: int | None,
+    output: str | None,
+) -> None:
+    """只生成 payload（不联网、不签名）。"""
+    options = UploadOptions(
+        route_path=route_path,
+        target_distance_m=distance,
+        seed=seed,
+        dry_run=True,
+        output_payload=output,
+    )
+    report = upload_route(config, options, progress=click.echo)
+    if report.record is None:
+        click.echo(f"✗ {report.result.raw_response}", err=True)
+        raise SystemExit(1)
+    click.echo("✓ 生成完成（dry-run）")
+
+
+@main.command()
+@click.option("--config", "-c", default="config.yaml")
+@click.option("--route", "-r", "route_path", required=True, help="路径 JSON")
+@click.option("--distance", "-d", type=float, default=2150.0, help="目标距离（米）")
+@click.option("--seed", type=int, default=None)
+@click.option("--fast", is_flag=True, help="不等实时结束，立即提交（对照实验）")
+@click.option("--skip-sensor", is_flag=True, help="不上传传感器数据")
+@click.option("--out", "output", default=None, help="把明文 payload 写到文件")
+def upload(
+    config: str,
+    route_path: str,
+    distance: float,
+    seed: int | None,
+    fast: bool,
+    skip_sensor: bool,
+    output: str | None,
+) -> None:
+    """申请 sportId → 生成路径 → 等记录结束 → 提交。"""
+    options = UploadOptions(
+        route_path=route_path,
+        target_distance_m=distance,
+        seed=seed,
+        fast=fast,
+        skip_sensor=skip_sensor,
+        output_payload=output,
+    )
+    report = upload_route(config, options, progress=click.echo)
+    result = report.result
+    if report.record is not None:
+        click.echo(
+            f"[记录] {report.record.start_date} → {report.record.end_date} "
+            f"{report.record.dllc} km"
+        )
+    raise SystemExit(_emit_result(result))
+
+
+@main.command()
+@click.option("--config", "-c", default="config.yaml")
+@click.option("--route", "-r", "route_path", required=True, help="路径 JSON")
+@click.option("--distance", "-d", type=float, default=2150.0, help="目标距离（米）")
+@click.option("--seed", type=int, default=None)
+@click.option("--out", "output", default=None, help="把明文 payload 写到文件")
+def prepare(
+    config: str,
+    route_path: str,
+    distance: float,
+    seed: int | None,
+    output: str | None,
+) -> None:
+    """第一步：领取 sportId 并生成记录落盘（不提交）。"""
+    from .pipeline import prepare_route
+
+    options = UploadOptions(
+        route_path=route_path,
+        target_distance_m=distance,
+        seed=seed,
+        output_payload=output,
+    )
+    report = prepare_route(config, options, progress=click.echo)
+    if not report.session_path:
+        click.echo(f"✗ 准备失败: {report.result.raw_response}", err=True)
+        raise SystemExit(1)
+    click.echo(f"✓ 已准备 session={report.session_path}")
+    raise SystemExit(0)
+
+
+@main.command()
+@click.option("--config", "-c", default="config.yaml")
+@click.option("--session", "session_path", default=None, help="要提交的会话文件（默认取最新）")
+@click.option("--skip-sensor", is_flag=True, help="不上传传感器数据")
+@click.option("--no-wait", is_flag=True, help="记录还没结束就直接报错退出")
+@click.option("--out", "output", default=None, help="把明文 payload 写到文件")
+def submit(
+    config: str,
+    session_path: str | None,
+    skip_sensor: bool,
+    no_wait: bool,
+    output: str | None,
+) -> None:
+    """第二步：等记录结束后提交 prepare 落盘的 session。"""
+    from .pipeline import submit_session
+
+    report = submit_session(
+        config,
+        session_path,
+        skip_sensor=skip_sensor,
+        no_wait=no_wait,
+        output_payload=output,
+        progress=click.echo,
+    )
+    if report.record is not None:
+        click.echo(
+            f"[记录] {report.record.start_date} → {report.record.end_date} "
+            f"{report.record.dllc} km"
+        )
+    raise SystemExit(_emit_result(report.result))
+
+
+@main.command(name="routes")
+@click.option("--config", "-c", default="config.yaml")
+def list_routes(config: str) -> None:
+    """列出 config/routes 下的路径及长度。"""
+    from .generator import load_route
+
+    root = Path(__file__).resolve().parent.parent / "config" / "routes"
+    for path in sorted(root.glob("*.json")):
+        try:
+            geometry = load_route(path)
+            click.echo(f"{path.name:<24} {geometry.length_m:>8.0f} m")
+        except Exception as exc:  # noqa: BLE001
+            click.echo(f"{path.name:<24} 读取失败: {exc}")
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,11 @@
+[Unit]
+Description=Run HUST sports upload daily at 10:00 Asia/Shanghai
+
+[Timer]
+OnCalendar=*-*-* 10:00:00
+AccuracySec=1min
+Persistent=false
+Unit=hustrun-upload.service
+
+[Install]
+WantedBy=timers.target
