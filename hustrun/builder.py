@@ -123,20 +123,6 @@ def build_json_string(record: SportRecord, auth: AuthConfig) -> str:
     return _serialize_gson(payload)
 
 
-def build_prejudgment_json(record: SportRecord, auth: AuthConfig) -> str:
-    """构造运动结束页提交给 ``prejudgment`` 的轻量 JSON。
-
-    官方结束链在最终 ``MySportLatlng`` 坐标快照落库前执行预判，因此
-    ``UploadJsonSports.build(sportBean, false)`` 的 coordinate/beganPoint/
-    endPoint 仍为 null，并被 Gson 省略。其余统计、配速和分钟速度字段与最终
-    ``savesports`` 使用同一记录。
-    """
-    payload = build_upload_json(record, auth)
-    for field in ("coordinate", "beganPoint", "endPoint"):
-        payload.pop(field, None)
-    return _serialize_gson(payload)
-
-
 def _serialize_gson(payload: dict[str, Any]) -> str:
     """按 App 的 Gson 默认规则序列化 payload。"""
     # 紧凑 JSON（Gson 默认无空格），确保 ASCII 编码

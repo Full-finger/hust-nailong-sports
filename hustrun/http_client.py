@@ -9,7 +9,7 @@ import re
 import hashlib
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Mapping, Optional
 from urllib.parse import urlencode
 
@@ -56,33 +56,6 @@ class SportsIdResult:
     @property
     def ok(self) -> bool:
         return bool(self.sport_id)
-
-
-@dataclass(frozen=True)
-class PrejudgmentCheck:
-    is_valid: str
-    content: str
-
-
-@dataclass
-class PrejudgmentResult:
-    success: bool = False
-    checks: list[PrejudgmentCheck] = field(default_factory=list)
-    http_status: int = 0
-    api_code: str = ""
-    message: str = ""
-
-    @property
-    def ok(self) -> bool:
-        return (
-            self.success
-            and bool(self.checks)
-            and all(check.is_valid == "1" for check in self.checks)
-        )
-
-    @property
-    def failures(self) -> list[PrejudgmentCheck]:
-        return [check for check in self.checks if check.is_valid != "1"]
 
 
 # ============================================================
@@ -403,61 +376,6 @@ def request_sports_id(
 # 上传端点
 # ============================================================
 
-def request_prejudgment(
-    auth: AuthConfig,
-    encrypted_payload: str,
-    signer: Optional[RequestSigner] = None,
-) -> PrejudgmentResult:
-    """执行官方结束页的距离、时长、时段和配速预判。"""
-    path = "/api/l/v6.1/prejudgment"
-    url = f"{auth.server_url}{path}"
-    data = {"jsonsports": encrypted_payload}
-    try:
-        headers = build_form_headers(auth, path, signer, data)
-    except ValueError as exc:
-        return PrejudgmentResult(message=str(exc))
-
-    try:
-        response = requests.post(url, headers=headers, data=data, timeout=30)
-    except requests.RequestException as exc:
-        return PrejudgmentResult(message=f"网络请求失败: {exc}")
-
-    result = PrejudgmentResult(http_status=response.status_code)
-    if response.status_code != 200:
-        result.message = _http_error_message(response)
-        return result
-    try:
-        body = response.json()
-    except (requests.JSONDecodeError, json.JSONDecodeError, ValueError):
-        result.message = "prejudgment 返回 HTTP 200，但响应不是 JSON"
-        return result
-
-    ok, code, message = _api_status(body)
-    result.api_code = code
-    result.message = message
-    if not ok or not isinstance(body, dict):
-        return result
-    data_value = body.get("data")
-    if not isinstance(data_value, list):
-        result.message = "prejudgment 响应缺少检查列表"
-        return result
-
-    checks: list[PrejudgmentCheck] = []
-    for item in data_value:
-        if not isinstance(item, dict) or "isvalid" not in item:
-            result.message = "prejudgment 检查项格式异常"
-            return result
-        checks.append(
-            PrejudgmentCheck(
-                is_valid=str(item.get("isvalid", "")),
-                content=str(item.get("content", "")),
-            )
-        )
-    result.checks = checks
-    result.success = True
-    return result
-
-
 def upload_savesports(
     auth: AuthConfig,
     encrypted_payload: str,
@@ -466,8 +384,12 @@ def upload_savesports(
     """
     上传主运动记录。
 
-    对应: POST api/l/v7/savesports (@FormUrlEncoded)
+    对应: POST api/l/v6.1/savesports (@FormUrlEncoded)
          field: jsonsports = <AES密文>
+
+    v6.1 不校验 ``beginTime`` 是否早于 sportId 的服务端创建时刻，因此记录
+    可以整体回溯到当前时间之前再提交；v7 会以 ``24``（数据异常）拒绝这种
+    记录。提交后的 ``isValid``/``checkStatus`` 与 v7 成功记录一致。
 
     Args:
         auth: 鉴权配置
@@ -476,7 +398,7 @@ def upload_savesports(
     Returns:
         UploadResult
     """
-    path = "/api/l/v7/savesports"
+    path = "/api/l/v6.1/savesports"
     url = f"{auth.server_url}{path}"
     data = {"jsonsports": encrypted_payload}
     missing = auth.missing_session_fields + auth.missing_device_fields

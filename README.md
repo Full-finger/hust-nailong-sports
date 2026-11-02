@@ -11,7 +11,7 @@
 
 奶龙体育助手是一条**纯协议**的 HUST 校园跑上传链路：
 
-- **核心**：CAS 登录 → 领取本次运动任务 → 按路线生成一条跑步记录 → 等记录时间真正走完 → 本地签名并提交 → 补传传感器数据。不需要手机、模拟器或改包 App。
+- **核心**：CAS 登录 → 领取本次运动任务 → 按路线生成一条回溯到当前时刻之前的跑步记录 → 本地签名并提交 → 补传传感器数据。不需要手机、模拟器或改包 App。
 - **可选**：基于 [easybot](https://github.com/SaucePlum/easybot) 的 QQ 机器人，私聊完成登录/上传/看日志，给朋友发邀请码各自用自己的账号，每天 10:00 自动串行上传。
 
 > 本项目仅用于个人学习与协议研究。请遵守学校体育考核规定，只用自己的账号，风险自负。
@@ -34,12 +34,12 @@ python -m hustrun check                   # 只读自检：会话 / 服务端时
 python -m hustrun upload -r config/routes/route_track.json -d 2150
 ```
 
-`upload` 会原地等记录时间走完再提交（2.15 km ≈ 8 分钟）。不想让进程一直
-挂着，可以拆成两段：
+`upload` 会先生成记录，再把整条时间线回溯到当前时刻之前立即提交（不再按
+真实时间等满 2.15 km 的时长）。也可以拆成两段：
 
 ```bash
 python -m hustrun prepare -r config/routes/route_track.json -d 2150   # 领任务 + 生成记录
-python -m hustrun submit      # 到点后提交，默认取最新 session
+python -m hustrun submit      # 随时提交，默认取最新 session
 ```
 
 只看生成的数据（不联网、不签名）：
@@ -49,8 +49,19 @@ python -m hustrun generate -r config/routes/route_track.json -d 2150 --out paylo
 python -m hustrun routes      # 列出 config/routes 下每条路线的长度
 ```
 
-> 记录时间必须真实走完才能提交；`prepare` 只是把「领取 + 生成」和「提交」
-> 拆成两步，中间的时间不能压缩。
+> `prepare` 只是把「生成」和「提交」拆成两步；记录在生成时已经回溯，
+> 提交不需要等待。
+
+补传之前某次运动：用 `--end-time` 指定记录结束时刻（北京时间），记录时长
+仍由路线和距离决定。支持 `HH:MM`、`HH:MM:SS` 和完整日期：
+
+```bash
+python -m hustrun upload -r config/routes/route_track.json -d 2150 --end-time "07:30"
+python -m hustrun prepare -r config/routes/route_track.json -d 2150 --end-time "2026-11-01 18:20:00"
+```
+
+结束时刻不能晚于服务端当前时间，且整条记录必须落在 06:00–23:00 内。历史
+日期能否被服务端接受取决于学校规则，尚未用真实提交验证。
 
 ---
 
@@ -115,7 +126,7 @@ assets/               README 用图
 - 只在 06:00–23:00 时段、单次 ≥2.0 km 的规则下有效
 - 提交后是「待审」，学校审核后才变成「有效」
 - TOKEN 约 7 天过期（`code=2001`），重新 `login` 即可
-- 适配 App 1.0.9 的协议；服务端升级后可能需要重新抓包
+- 适配 App 1.0.9–1.2.1 的业务协议（`savesports` 走 `v6.1`，允许提交回溯记录）；服务端升级后可能需要重新抓包
 
 ## 隐私与安全
 
