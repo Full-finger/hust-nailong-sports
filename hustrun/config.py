@@ -82,11 +82,11 @@ def load_auth_config(config_path: str = "config.yaml") -> AuthConfig:
 
     # --- 读取 XML 文件 ---
     header = _read_xml_strings(_resolve_path(paths.get(
-        "header_xml", "../spprefs/spprefs/HEADER.xml")))
+        "header_xml", ".credentials/HEADER.xml")))
     userinfo = _read_xml_strings(_resolve_path(paths.get(
-        "userinfo_xml", "../spprefs/spprefs/USERINFO.xml")))
+        "userinfo_xml", ".credentials/USERINFO.xml")))
     school = _read_xml_strings(_resolve_path(paths.get(
-        "school_xml", "../spprefs/spprefs/SCHOOL.xml")))
+        "school_xml", ".credentials/SCHOOL.xml")))
 
     # --- 组装 AuthConfig ---
 
@@ -152,15 +152,9 @@ def get_data_paths(config_path: str = "config.yaml") -> dict:
     paths = cfg.get("paths", {})
     return {
         "header_xml": _resolve_path(paths.get(
-            "header_xml", "../spprefs/spprefs/HEADER.xml")),
+            "header_xml", ".credentials/HEADER.xml")),
         "userinfo_xml": _resolve_path(paths.get(
-            "userinfo_xml", "../spprefs/spprefs/USERINFO.xml")),
+            "userinfo_xml", ".credentials/USERINFO.xml")),
         "school_xml": _resolve_path(paths.get(
-            "school_xml", "../spprefs/spprefs/SCHOOL.xml")),
-        "db_path": _resolve_path(paths.get(
-            "db_path", "../ygty_mysport.db")),
-        "json_path": _resolve_path(paths.get(
-            "json_path", "../sport_2026-06-20.json")),
-        "sensor_path": _resolve_path(paths.get(
-            "sensor_path", "data/sensor_a80da7e9.txt")),
+            "school_xml", ".credentials/SCHOOL.xml")),
     }

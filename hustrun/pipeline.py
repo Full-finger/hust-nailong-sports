@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from .builder import build_json_string, build_prejudgment_json, build_upload_json
-from .config import get_data_paths, load_auth_config
+from .config import load_auth_config
 from .consistency import (
     RecordConsistencyError,
     assert_record_consistent,

@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import sys
 import tempfile
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import click
@@ -62,6 +62,43 @@ def _prompt_dynamic_code(message: str) -> str:
     return click.prompt("企业微信动态验证码", type=str).strip()
 
 
+_SP_XML_HEADER = '<?xml version="1.0" encoding="utf-8" standalone="yes"?>\n<map>\n</map>\n'
+
+
+def _ensure_sp_xml(path: Path) -> None:
+    """首次运行时创建空的 SharedPreferences XML，权限尽量收成 600。"""
+    if path.exists():
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(_SP_XML_HEADER, encoding="utf-8")
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+
+
+def _write_userinfo(path: Path, xh: str, name: str) -> None:
+    """写入 USERINFO.xml，保留已有的 USER_ROLES。"""
+    roles = "1"
+    if path.exists():
+        try:
+            for elem in ET.parse(path).getroot().findall("string"):
+                if elem.get("name") == "USER_ROLES" and elem.text:
+                    roles = elem.text
+        except ET.ParseError:
+            pass
+    root = ET.Element("map")
+    ET.SubElement(root, "string", {"name": "USERXH"}).text = xh
+    ET.SubElement(root, "string", {"name": "USERNAME"}).text = name
+    ET.SubElement(root, "string", {"name": "USER_ROLES"}).text = roles
+    path.parent.mkdir(parents=True, exist_ok=True)
+    ET.ElementTree(root).write(path, encoding="utf-8", xml_declaration=True)
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+
+
 def _emit_result(result) -> int:
     """打印上传结论并给出退出码：0 有效 / 2 被判无效 / 1 请求失败。"""
     if result.success and result.is_valid == "1":
@@ -100,14 +137,11 @@ def login(config: str, username: str | None, password: str | None, debug: bool) 
     auth = load_auth_config(config)
     paths = get_data_paths(config)
     header_path = Path(paths["header_xml"])
+    userinfo_path = Path(paths["userinfo_xml"])
 
-    # 首次登录时把现有的授权抓包复制成本地凭证文件，避免改动其他项目的文件。
-    if not header_path.exists():
-        fallback = Path(__file__).resolve().parent.parent / ".." / "spprefs" / "spprefs" / "HEADER.xml"
-        if fallback.is_file():
-            header_path.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(fallback, header_path)
-            click.echo(f"[登录] 已复制初始凭证: {header_path}")
+    # 首次运行时本地还没有凭证文件：先放一个空模板，登录成功后由结果填写。
+    had_credentials = header_path.exists()
+    _ensure_sp_xml(header_path)
 
     username = username or auth.xh or click.prompt("用户名/学号", type=str)
     password = password or getpass("密码: ")
@@ -137,10 +171,16 @@ def login(config: str, username: str | None, password: str | None, debug: bool) 
         raise SystemExit(1)
 
     click.echo("✓ 登录成功（TOKEN/SECRET 不在终端显示）")
-    if not header_path.exists():
-        raise click.ClickException(f"凭证文件不存在，无法写入: {header_path}")
-    update_header_xml(str(header_path), result, backup=True)
+    update_header_xml(str(header_path), result, backup=had_credentials)
     click.echo(f"✓ 凭证已更新: {header_path}")
+
+    name = result.name
+    if not name and sys.stdin.isatty():
+        name = click.prompt(
+            "姓名（显示在运动记录里，可留空）", default="", show_default=False
+        ).strip()
+    _write_userinfo(userinfo_path, result.xh or username, name)
+    click.echo(f"✓ 用户信息已更新: {userinfo_path}")
 
 
 @main.command()
