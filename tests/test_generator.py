@@ -10,7 +10,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from hustrun.builder import build_json_string, build_prejudgment_json
+from hustrun.builder import build_json_string
 from hustrun.consistency import validate_record_consistency
 from hustrun.generator import generate_route_record, load_route, make_sensor_trace
 from hustrun.models import AuthConfig
@@ -92,12 +92,10 @@ class GeneratorTest(unittest.TestCase):
         self.assertEqual(len(payload["coordinate"]), len(record.points))
         self.assertEqual(payload["coordinate"][0]["t"], 0)
         self.assertNotIn("baseObjId", payload["coordinate"][0])
-        prejudgment = json.loads(build_prejudgment_json(record, AUTH))
-        self.assertNotIn("coordinate", prejudgment)
 
     def test_sensor_trace_length(self):
         trace = json.loads(make_sensor_trace(500, seed=1))
-        self.assertEqual(len(trace), 5_000)
+        self.assertEqual(len(trace), 10_000)
         self.assertTrue(all(0 < value < 40 for value in trace))
 
 

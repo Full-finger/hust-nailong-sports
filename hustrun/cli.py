@@ -15,6 +15,7 @@ from .config import get_data_paths, load_auth_config
 from .pipeline import (
     UploadOptions,
     check_session,
+    parse_end_time,
     upload_route,
 )
 
@@ -237,7 +238,11 @@ def generate(
 @click.option("--route", "-r", "route_path", required=True, help="路径 JSON")
 @click.option("--distance", "-d", type=float, default=2150.0, help="目标距离（米）")
 @click.option("--seed", type=int, default=None)
-@click.option("--fast", is_flag=True, help="不等实时结束，立即提交（对照实验）")
+@click.option(
+    "--end-time",
+    default=None,
+    help='记录结束时刻（北京时间 HH:MM 或 "YYYY-MM-DD HH:MM:SS"，默认现在）',
+)
 @click.option("--skip-sensor", is_flag=True, help="不上传传感器数据")
 @click.option("--out", "output", default=None, help="把明文 payload 写到文件")
 def upload(
@@ -245,16 +250,20 @@ def upload(
     route_path: str,
     distance: float,
     seed: int | None,
-    fast: bool,
+    end_time: str | None,
     skip_sensor: bool,
     output: str | None,
 ) -> None:
-    """申请 sportId → 生成路径 → 等记录结束 → 提交。"""
+    """申请 sportId → 生成记录 → 立即提交（可用 --end-time 补传历史记录）。"""
+    try:
+        end_ms = parse_end_time(end_time) if end_time else None
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
     options = UploadOptions(
         route_path=route_path,
         target_distance_m=distance,
         seed=seed,
-        fast=fast,
+        end_ms=end_ms,
         skip_sensor=skip_sensor,
         output_payload=output,
     )
@@ -273,21 +282,32 @@ def upload(
 @click.option("--route", "-r", "route_path", required=True, help="路径 JSON")
 @click.option("--distance", "-d", type=float, default=2150.0, help="目标距离（米）")
 @click.option("--seed", type=int, default=None)
+@click.option(
+    "--end-time",
+    default=None,
+    help='记录结束时刻（北京时间 HH:MM 或 "YYYY-MM-DD HH:MM:SS"，默认现在）',
+)
 @click.option("--out", "output", default=None, help="把明文 payload 写到文件")
 def prepare(
     config: str,
     route_path: str,
     distance: float,
     seed: int | None,
+    end_time: str | None,
     output: str | None,
 ) -> None:
     """第一步：领取 sportId 并生成记录落盘（不提交）。"""
     from .pipeline import prepare_route
 
+    try:
+        end_ms = parse_end_time(end_time) if end_time else None
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
     options = UploadOptions(
         route_path=route_path,
         target_distance_m=distance,
         seed=seed,
+        end_ms=end_ms,
         output_payload=output,
     )
     report = prepare_route(config, options, progress=click.echo)
@@ -302,23 +322,20 @@ def prepare(
 @click.option("--config", "-c", default="config.yaml")
 @click.option("--session", "session_path", default=None, help="要提交的会话文件（默认取最新）")
 @click.option("--skip-sensor", is_flag=True, help="不上传传感器数据")
-@click.option("--no-wait", is_flag=True, help="记录还没结束就直接报错退出")
 @click.option("--out", "output", default=None, help="把明文 payload 写到文件")
 def submit(
     config: str,
     session_path: str | None,
     skip_sensor: bool,
-    no_wait: bool,
     output: str | None,
 ) -> None:
-    """第二步：等记录结束后提交 prepare 落盘的 session。"""
+    """第二步：提交 prepare 落盘的 session。"""
     from .pipeline import submit_session
 
     report = submit_session(
         config,
         session_path,
         skip_sensor=skip_sensor,
-        no_wait=no_wait,
         output_payload=output,
         progress=click.echo,
     )

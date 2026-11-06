@@ -373,14 +373,21 @@ def generate_route_record(
     return record
 
 
+SENSOR_SAMPLE_HZ = 20
+
+
 def make_sensor_trace(duration_seconds: int, seed: Optional[int] = None) -> str:
-    """生成与记录时长匹配的加速度幅值序列（约 10 Hz）。"""
+    """生成与记录时长匹配的加速度幅值序列（20 Hz）。
+
+    真机样本约每个 1 Hz 轨迹点对应 18.4 个采样值（≈20 Hz），1.2.1 客户端
+    也固定按 ``20 * activeTime`` 生成，这里保持一致。
+    """
     rng = random.Random(seed)
     samples: list[float] = []
-    total = max(1, int(duration_seconds * 10))
+    total = max(1, int(duration_seconds * SENSOR_SAMPLE_HZ))
     phase = rng.uniform(0.0, 2.0 * math.pi)
     for index in range(total):
-        t = index / 10.0
+        t = index / SENSOR_SAMPLE_HZ
         cadence_hz = rng.uniform(2.6, 2.9)
         stride = 5.2 * math.sin(2.0 * math.pi * cadence_hz * t + phase)
         sway = 0.8 * math.sin(2.0 * math.pi * 0.35 * t)

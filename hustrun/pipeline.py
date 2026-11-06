@@ -1,23 +1,27 @@
-"""一键上传编排：申请 sportId → 沿路径生成记录 → 等到记录结束 → 提交。
+"""一键上传编排：领取 sportId → 沿路径生成记录 → 回溯到当前时间 → 提交。
 
-官方时间线（HAR 已确认）：
+官方时间线（1.2.1 客户端实测）：
 
     运动开始前  GET  /api/l/v7/sportsId
     运动中      客户端逐秒记录轨迹
-    点“结束”    POST /api/l/v6.1/prejudgment
-    倒计时内    POST /api/l/v7/savesports
+    点“结束”    POST /api/l/v6.1/savesports
     随后        POST /api/l/v7/upload/sensorZipFile
 
-其中 sportId 由服务端在运动**开始前**分配。因此默认流程先申请 sportId，
-再把记录的开始时间设为申请成功之后，并等到记录的结束时间真正过去才提交。
-``fast=True`` 会立即提交一条“回溯生成”的记录，仅用于对照实验。
+``v6.1/savesports`` 不校验 ``beginTime`` 是否早于 sportId 的服务端创建
+时刻，记录可以整体回溯到提交时刻之前，因此不必按真实时间等满整条记录。
+sportId 仍是记录主键（随 payload 和传感器一起上传），但它的领取时刻不再
+约束轨迹时间。
 
-这条时间线可以拆成两段，跨进程执行：
+这条时间线依然可以拆成两段，跨进程执行：
 
     python -m hustrun prepare -r ... -d 2150   # 领取 sportId 并生成记录，落盘
-    python -m hustrun submit --session ...     # 到点后只做提交
+    python -m hustrun submit --session ...     # 想提交时再提交，不再等待
 
-拆开的好处是等待期间可以关掉终端，WAF/登录问题也不会让已领取的 sportId 作废。
+拆开的好处是生成和提交的时机可以分开（例如定时任务只负责提交）。
+
+默认记录的结束时刻是“服务端当前时间之前”；``UploadOptions.end_ms`` /
+``--end-time`` 可以把结束时刻指到任意已经过去的北京时刻，用来补传之前
+某次运动（记录时长仍由路线和距离决定）。
 """
 
 from __future__ import annotations
@@ -29,7 +33,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Optional
 
-from .builder import build_json_string, build_prejudgment_json, build_upload_json
+from .builder import build_json_string, build_upload_json
 from .config import load_auth_config
 from .consistency import (
     RecordConsistencyError,
@@ -46,7 +50,6 @@ from .generator import (
 from .http_client import (
     probe_server_time,
     request_in_sport_time,
-    request_prejudgment,
     request_sports_id,
     upload_savesports,
     upload_sensor_zip,
@@ -64,6 +67,8 @@ from .signer import PythonSigner, RequestSigner, SignerError
 # 官方服务允许的运动时段（客户端直接丢弃时段外的数据）。
 ALLOWED_HOUR_START = 6
 ALLOWED_HOUR_END = 23
+# 回溯记录与提交时刻之间保留的余量，避免 endTime 落在服务端未来。
+BACKDATE_MARGIN_MS = 2_000
 # 服务端时间按北京时间解释，避免本机时区不是 UTC+8 时判断错位。
 SERVER_TZ = timezone(timedelta(hours=8))
 # prepare/submit 之间传递已领取 sportId 的落地目录（含个人轨迹，已在 .gitignore）。
@@ -78,11 +83,12 @@ class UploadOptions:
     route_path: str
     target_distance_m: float = 2_150.0
     seed: Optional[int] = None
-    fast: bool = False
     skip_sensor: bool = False
     dry_run: bool = False
     output_payload: Optional[str] = None
-    wait_extra_seconds: float = 3.0
+    # 记录的结束时刻（服务端 epoch 毫秒，北京时间解释）。None 表示结束于
+    # 服务端当前时间之前；指定时用于补传以前某次运动。
+    end_ms: Optional[int] = None
     sport_type: str = "3"
     route_id: str = "7"
     route_name: str = "跑步-男生"
@@ -92,12 +98,37 @@ class UploadOptions:
 class FlowReport:
     result: UploadResult
     record: Optional[SportRecord] = None
-    prejudgment_ok: bool = False
     server_sport_id: str = ""
     sport_id_issued_at_ms: Optional[int] = None
-    waited_seconds: float = 0.0
     session_path: str = ""
     notes: list[str] = field(default_factory=list)
+
+
+def parse_end_time(text: str) -> int:
+    """把北京时间的结束时刻解析为 epoch 毫秒。
+
+    支持 ``HH:MM`` / ``HH:MM:SS``（取今天）和 ``YYYY-MM-DD HH:MM[:SS]``。
+    """
+    value = text.strip()
+    formats = (
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d %H:%M",
+        "%Y-%m-%d",
+        "%H:%M:%S",
+        "%H:%M",
+    )
+    for fmt in formats:
+        try:
+            parsed = datetime.strptime(value, fmt)
+        except ValueError:
+            continue
+        if fmt.startswith("%H"):
+            today = datetime.now(SERVER_TZ)
+            parsed = parsed.replace(year=today.year, month=today.month, day=today.day)
+        return int(parsed.replace(tzinfo=SERVER_TZ).timestamp() * 1000)
+    raise ValueError(
+        f"无法解析结束时刻 {text!r}，支持 HH:MM[:SS] 或 'YYYY-MM-DD HH:MM[:SS]'"
+    )
 
 
 def _noop(_message: str) -> None:
@@ -148,7 +179,12 @@ def _require_auth(config_path: str) -> AuthConfig:
 
 
 def _shift_record(record: SportRecord, delta_ms: int) -> None:
-    """整体平移一条已生成记录的时间线（用于 fast 对照模式）。"""
+    """整体平移一条已生成记录的时间线。
+
+    记录生成时按“从当前时刻向未来跑”排布，提交前再整体前移，使结束时间
+    落在服务端当前时间之前。v6.1/savesports 不做 sportId 创建时刻校验，
+    所以整条轨迹可以完全位于过去。
+    """
     record.start_date_long += delta_ms
     record.end_date_long += delta_ms
     for point in record.points:
@@ -268,8 +304,8 @@ def _claim_and_generate(
     signer: RequestSigner,
     progress: Progress,
     notes: list[str],
-) -> tuple[str, int, SportRecord, int]:
-    """服务端时间 → 时段判定 → 领取 sportId → 生成记录（还不提交）。
+) -> tuple[str, int, SportRecord, int, int]:
+    """服务端时间 → 时段判定 → 领取 sportId → 生成回溯记录（还不提交）。
 
     Returns:
         (sportId, 领取时刻 ms, 记录, 服务端时间 ms, 服务端减本机的时差 ms)
@@ -295,14 +331,17 @@ def _claim_and_generate(
         ).strftime("%Y-%m-%d %H:%M:%S")
     )
 
-    # 服务端时段判定（官方选择运动类型时也会查这个接口）
+    # 服务端时段判定（官方选择运动类型时也会查这个接口）。补传历史记录时
+    # 该接口只能反映“现在”，记录本身是否在允许时段由下方本地检查负责。
+    explicit_end = options.end_ms is not None
     window = request_in_sport_time(auth, options.route_id, signer)
     if window.ok:
         progress(
-            "[时段] 服务端判定: "
+            "[时段] 服务端当前判定: "
             + ("在允许时段内" if window.allowed else "不在允许时段")
+            + ("（历史记录按记录时间校验）" if explicit_end else "")
         )
-        if not window.allowed:
+        if not explicit_end and not window.allowed:
             raise PrepareAbort(
                 FlowReport(
                     UploadResult(
@@ -338,16 +377,35 @@ def _claim_and_generate(
         f"{datetime.fromtimestamp(issued_at_ms / 1000.0, tz=SERVER_TZ).strftime('%H:%M:%S')}）"
     )
 
-    # 再取一次服务端时间，确保记录的起点确实晚于 sportId 的分配时刻。
-    anchor = probe_server_time(auth, signer)
-    anchor_ms = probe.server_time
-    if anchor.ok and anchor.server_time:
-        anchor_ms = anchor.server_time
+    # 先把记录按“从当前时刻开始”生成，再整体平移，使结束时间落在指定
+    # 的历史时刻或服务端当前时间之前。v6.1/savesports 不要求 beginTime
+    # 晚于 sportId 的领取时刻，所以整条轨迹可以完全位于过去。
+    target_end_ms = (
+        options.end_ms
+        if options.end_ms is not None
+        else issued_at_ms - BACKDATE_MARGIN_MS
+    )
+    if target_end_ms > issued_at_ms:
+        raise PrepareAbort(
+            FlowReport(
+                UploadResult(
+                    success=False,
+                    raw_response=(
+                        "结束时刻 "
+                        + datetime.fromtimestamp(
+                            target_end_ms / 1000.0, tz=SERVER_TZ
+                        ).strftime("%Y-%m-%d %H:%M:%S")
+                        + " 晚于服务端当前时间；当前流程只提交已经结束的记录"
+                    ),
+                ),
+                server_sport_id=sport_id,
+                sport_id_issued_at_ms=issued_at_ms,
+            )
+        )
 
-    # 记录从 sportId 分配之后开始
     record = generate_route_record(
         geometry,
-        start_ms=anchor_ms + 3_000,
+        start_ms=issued_at_ms,
         sport_id=sport_id,
         xh=auth.xh,
         name=auth.name,
@@ -357,49 +415,27 @@ def _claim_and_generate(
         route_id=options.route_id,
         route_name=options.route_name,
     )
-    progress(f"[生成] {route_summary(record)}")
-    if not _check_window(record, progress):
+    _shift_record(record, target_end_ms - record.end_date_long)
+    progress(
+        f"[生成] {route_summary(record)}"
+        f"（{'指定结束时刻' if explicit_end else '已回溯'}）"
+    )
+
+    # 服务端时段接口可用且是“当前记录”时以它为准；历史记录和接口不可用
+    # 的情况退回本地 6–23 点判断。
+    if (explicit_end or not window.ok) and not _check_window(record, progress):
         raise PrepareAbort(
             FlowReport(
                 UploadResult(
                     success=False,
-                    raw_response="当前不在官方允许的运动时段内",
+                    raw_response="记录不在官方允许的运动时段（06:00–23:00）内",
                 ),
                 record=record,
                 server_sport_id=sport_id,
                 sport_id_issued_at_ms=issued_at_ms,
             )
         )
-    return sport_id, issued_at_ms, record, anchor_ms, offset_ms
-
-
-def _wait_for_end(
-    record: SportRecord,
-    auth: AuthConfig,
-    signer: RequestSigner,
-    progress: Progress,
-    extra_seconds: float,
-) -> float:
-    """阻塞到记录的结束时间（按服务端时钟）之后，返回实际等待秒数。"""
-    probe = probe_server_time(auth, signer)
-    offset_ms = 0
-    if probe.ok and probe.server_time:
-        offset_ms = probe.server_time - int(time.time() * 1000)
-    else:
-        progress(f"[等待] 取服务端时间失败，按本机时钟估算: {probe.message}")
-    target_local_ms = record.end_date_long - offset_ms + int(extra_seconds * 1000)
-    started = time.monotonic()
-    while True:
-        remaining = (target_local_ms - int(time.time() * 1000)) / 1000.0
-        if remaining <= 0:
-            break
-        if remaining > 60:
-            progress(f"[等待] 记录还需 {remaining / 60:.1f} 分钟结束 ...")
-            time.sleep(min(60.0, remaining - 55.0))
-        else:
-            time.sleep(max(0.2, remaining))
-    progress("[等待] 记录时间已结束，开始提交")
-    return time.monotonic() - started
+    return sport_id, issued_at_ms, record, issued_at_ms, offset_ms
 
 
 def _submit_record(
@@ -412,9 +448,8 @@ def _submit_record(
     *,
     sport_id: str,
     issued_at_ms: Optional[int],
-    waited: float,
 ) -> FlowReport:
-    """提交前校验 → payload → prejudgment → savesports → sensorZipFile。"""
+    """提交前校验 → payload → savesports → sensorZipFile。"""
     try:
         assert_record_consistent(record)
     except RecordConsistencyError as exc:
@@ -423,7 +458,6 @@ def _submit_record(
             record=record,
             server_sport_id=sport_id,
             sport_id_issued_at_ms=issued_at_ms,
-            waited_seconds=waited,
             notes=notes,
         )
 
@@ -438,7 +472,6 @@ def _submit_record(
                 record=record,
                 server_sport_id=sport_id,
                 sport_id_issued_at_ms=issued_at_ms,
-                waited_seconds=waited,
                 notes=notes,
             )
 
@@ -447,35 +480,8 @@ def _submit_record(
     encrypted = encrypt_for_upload(payload_json, auth.aes_key, auth.aes_encoding)
     progress(f"[构造] payload {len(payload_json)} 字符，密文 {len(encrypted)} 字符")
 
-    # prejudgment
-    prejudgment_json = build_prejudgment_json(record, auth)
-    encrypted_prejudgment = encrypt_for_upload(
-        prejudgment_json, auth.aes_key, auth.aes_encoding
-    )
-    progress("[预判] POST /api/l/v6.1/prejudgment ...")
-    prejudgment = request_prejudgment(auth, encrypted_prejudgment, signer)
-    if not prejudgment.ok:
-        detail = "；".join(check.content for check in prejudgment.failures) or prejudgment.message
-        return FlowReport(
-            UploadResult(
-                success=False,
-                raw_response=f"prejudgment 未通过: {detail}",
-                http_status=prejudgment.http_status,
-                api_code=prejudgment.api_code,
-            ),
-            record=record,
-            server_sport_id=sport_id,
-            sport_id_issued_at_ms=issued_at_ms,
-            waited_seconds=waited,
-            notes=notes,
-        )
-    for check in prejudgment.checks:
-        progress(
-            f"[预判] {'通过' if check.is_valid == '1' else '失败'}: {check.content}"
-        )
-
-    # savesports
-    progress("[上传] POST /api/l/v7/savesports ...")
+    # savesports（v6.1：不要求 beginTime 晚于 sportId 创建时刻）
+    progress("[上传] POST /api/l/v6.1/savesports ...")
     result = upload_savesports(auth, encrypted, signer)
     result.sport_id = result.sport_id or sport_id
     progress(
@@ -504,10 +510,8 @@ def _submit_record(
     return FlowReport(
         result=result,
         record=record,
-        prejudgment_ok=True,
         server_sport_id=sport_id,
         sport_id_issued_at_ms=issued_at_ms,
-        waited_seconds=waited,
         notes=notes,
     )
 
@@ -519,37 +523,18 @@ def _run_network_flow(
     signer: RequestSigner,
     progress: Progress,
 ) -> FlowReport:
-    """一次性流程：领取 sportId → 生成 → 等结束 → 提交。"""
+    """一次性流程：领取 sportId → 生成回溯记录 → 立即提交。"""
     notes: list[str] = []
     try:
-        sport_id, issued_at_ms, record, server_time_ms, _offset_ms = _claim_and_generate(
-            auth, geometry, options, signer, progress, notes
+        sport_id, issued_at_ms, record, _server_time_ms, _offset_ms = (
+            _claim_and_generate(
+                auth, geometry, options, signer, progress, notes
+            )
         )
     except PrepareAbort as abort:
         return abort.report
 
     _dump_payload(record, auth, options, progress)
-
-    # 等到记录结束（fast 模式直接把时间线整体前移）
-    waited = 0.0
-    if options.fast:
-        latest_end = server_time_ms - 2_000
-        if record.end_date_long > latest_end:
-            delta = latest_end - record.end_date_long
-            _shift_record(record, delta)
-        progress("[时间] fast 模式：记录时间线已整体前移，立即提交")
-    else:
-        waited = _wait_for_end(
-            record, auth, signer, progress, options.wait_extra_seconds
-        )
-
-    # 这条差值就是「sportId 分配时刻 vs 轨迹最早时间戳」的实验变量。
-    shift_seconds = (record.start_date_long - issued_at_ms) / 1000.0
-    progress(
-        f"[时间] 记录起点比 sportId 领取时刻"
-        f"{'晚' if shift_seconds >= 0 else '早'} {abs(shift_seconds):.1f} 秒"
-    )
-
     return _submit_record(
         auth,
         record,
@@ -559,7 +544,6 @@ def _run_network_flow(
         notes,
         sport_id=sport_id,
         issued_at_ms=issued_at_ms,
-        waited=waited,
     )
 
 
@@ -643,10 +627,10 @@ def prepare_route(
     options: UploadOptions | None = None,
     progress: Optional[Progress] = None,
 ) -> FlowReport:
-    """领取 sportId、生成记录并落盘，不提交（第一阶段）。
+    """领取 sportId、生成回溯记录并落盘，不提交（第一阶段）。
 
-    与 `upload_route` 的区别只有「不等、不交」：时间线仍然是 sportId 之后开始，
-    结束时间交给 `submit_session` 去等。
+    与 `upload_route` 的区别只有「不交」：记录在生成时已整体回溯到当前
+    时间之前，`submit_session` 可以在任意时刻发送，不必再等满时长。
     """
     if options is None:
         raise ValueError("缺少上传参数")
@@ -663,8 +647,10 @@ def prepare_route(
     notes: list[str] = []
     try:
         with open_signer(config_path) as signer:
-            sport_id, issued_at_ms, record, _server_ms, offset_ms = _claim_and_generate(
-                auth, geometry, options, signer, progress, notes
+            sport_id, issued_at_ms, record, _server_ms, _offset_ms = (
+                _claim_and_generate(
+                    auth, geometry, options, signer, progress, notes
+                )
             )
     except PrepareAbort as abort:
         return abort.report
@@ -680,14 +666,9 @@ def prepare_route(
         record=record,
         options=options,
     )
-    # 用服务端时钟算剩余时间：本机时钟可能和服务器差几分钟，
-    # 直接用 time.time() 会把「还要等 8 分钟」显示成「2 分钟」。
-    server_now_ms = int(time.time() * 1000) + offset_ms
-    remaining = (record.end_date_long - server_now_ms) / 1000.0
     progress(f"[会话] 已写入 {path}")
     progress(
-        f"[会话] 记录 {record.start_date} → {record.end_date}，"
-        f"约 {max(0.0, remaining) / 60:.1f} 分钟后可提交："
+        f"[会话] 记录 {record.start_date} → {record.end_date}，可随时提交："
     )
     progress(f"[会话] python -m hustrun submit --session {path}")
     return FlowReport(
@@ -705,11 +686,10 @@ def submit_session(
     session_path: Optional[str] = None,
     *,
     skip_sensor: bool = False,
-    no_wait: bool = False,
     output_payload: Optional[str] = None,
     progress: Optional[Progress] = None,
 ) -> FlowReport:
-    """第二阶段：等记录结束，然后提交已落盘的记录。"""
+    """第二阶段：提交已落盘的记录（记录已是回溯时间，无需等待）。"""
     progress = progress or _noop
     path = Path(session_path) if session_path else latest_session()
     if path is None:
@@ -755,39 +735,6 @@ def submit_session(
     notes: list[str] = []
     try:
         with open_signer(config_path) as signer:
-            probe = probe_server_time(auth, signer)
-            if probe.ok and probe.server_time:
-                progress(
-                    "[服务器] 时间 "
-                    + datetime.fromtimestamp(
-                        probe.server_time / 1000.0, tz=SERVER_TZ
-                    ).strftime("%Y-%m-%d %H:%M:%S")
-                )
-            if no_wait:
-                if (
-                    probe.ok
-                    and probe.server_time
-                    and record.end_date_long > probe.server_time
-                ):
-                    remaining = (record.end_date_long - probe.server_time) / 1000.0
-                    return FlowReport(
-                        UploadResult(
-                            success=False,
-                            raw_response=(
-                                f"记录还没结束，还需 {remaining / 60:.1f} 分钟；"
-                                f"去掉 --no-wait 可原地等待"
-                            ),
-                        ),
-                        record=record,
-                        server_sport_id=sport_id,
-                        sport_id_issued_at_ms=issued_at_ms,
-                        session_path=str(path),
-                        notes=["not_finished"],
-                    )
-                waited = 0.0
-            else:
-                waited = _wait_for_end(record, auth, signer, progress, 0.0)
-
             _dump_payload(record, auth, options, progress)
             return _submit_record(
                 auth,
@@ -798,7 +745,6 @@ def submit_session(
                 notes,
                 sport_id=sport_id,
                 issued_at_ms=issued_at_ms,
-                waited=waited,
             )
     except SignerError as exc:
         return FlowReport(UploadResult(success=False, raw_response=str(exc)))
