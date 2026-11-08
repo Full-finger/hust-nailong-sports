@@ -133,9 +133,9 @@ def _pick_zoom(
     lat_min: float, lat_max: float, lon_min: float, lon_max: float,
     win_w: int, win_h: int,
 ) -> int:
-    """选最大 zoom 使得轨迹 bbox 约占窗口 2/3。"""
+    """选最大 zoom 使得轨迹 bbox 约占窗口 2/3。高德路网瓦片到 z18。"""
     lat_mid = (lat_min + lat_max) / 2
-    for z in range(19, 12, -1):
+    for z in range(18, 12, -1):
         n = float(2**z)
         w = (lon_max - lon_min) / 360 * n * TILE_SIZE * math.cos(math.radians(lat_mid))
         h = abs(_merc_y(lat_min, n) - _merc_y(lat_max, n))
@@ -171,6 +171,8 @@ def _fetch_base_map(
             try:
                 resp = requests.get(url, timeout=TILE_TIMEOUT,
                                     headers={"User-Agent": "hustrun/1.0"})
+                if resp.status_code != 200 or len(resp.content) < 200:
+                    return None  # 空白占位瓦片视为不可用
                 tile = Image.open(io.BytesIO(resp.content))
                 if tile.mode in ("P", "LA"):
                     tile = tile.convert("RGBA")

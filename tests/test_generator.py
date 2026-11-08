@@ -65,7 +65,7 @@ class GeneratorTest(unittest.TestCase):
         self.assertAlmostEqual(weighted, float(record.avg_speed), delta=0.6)
 
     def test_speed_fields_match_patched_app(self):
-        """v51 的 build() 会把 max 覆盖成 avg、把 min 统一成 "6.0"。"""
+        """v51 的 build() 会把 max 覆盖成 avg；min 只在 ≥6 时统一写 "6.0"。"""
         record = generate_route_record(
             load_route(ROUTES / "route_track.json"),
             start_ms=1_784_961_322_000,
@@ -75,7 +75,10 @@ class GeneratorTest(unittest.TestCase):
             seed=13,
         )
         self.assertEqual(record.max_speed_per_hour, record.avg_speed)
-        self.assertEqual(record.min_speed_per_hour, "6.0")
+        # 真实巡航速度下点速会低于 6 km/h，此时写入实际最小值
+        point_min = min(p.s for p in record.points if p.s > 0)
+        expected = "6.0" if point_min >= 6.0 else f"{point_min:.2f}".rstrip("0").rstrip(".")
+        self.assertEqual(record.min_speed_per_hour, expected)
 
     def test_payload_shape(self):
         record = generate_route_record(

@@ -210,11 +210,12 @@ def generate_route_record(
     sport_type: str = DEFAULT_SPORT_TYPE,
     route_id: str = DEFAULT_ROUTE_ID,
     route_name: str = DEFAULT_ROUTE_NAME,
-    min_speed_mps: float = 4.0,
-    max_speed_mps: float = 5.0,
-    min_accuracy_m: float = 4.0,
-    max_accuracy_m: float = 12.0,
+    min_speed_mps: float = 2.6,
+    max_speed_mps: float = 3.4,
+    min_accuracy_m: float = 3.7,
+    max_accuracy_m: float = 100.0,
     first_fix_delay_s: float = 2.0,
+    sample_interval_s: float = 2.0,
 ) -> SportRecord:
     """沿路径生成一条内部一致的跑步记录。
 
@@ -227,20 +228,29 @@ def generate_route_record(
         raise ValueError("目标距离过短")
     if not (1.0 <= min_speed_mps < max_speed_mps <= 12.0):
         raise ValueError("速度范围无效")
-    if not (0.0 <= min_accuracy_m < max_accuracy_m <= 50.0):
+    if not (0.0 <= min_accuracy_m < max_accuracy_m <= 120.0):
         raise ValueError("精度范围无效")
 
     rng = random.Random(seed)
-    base_speed = rng.uniform(min_speed_mps + 0.15, max_speed_mps - 0.15)
+    # 巡航速度与真实样本对齐：普通学生 9.4~12.2 km/h（5'~6'25''）。
+    # 之前默认 4.0~5.0 m/s 是竞技配速，卡片上一眼假。
+    base_speed = rng.uniform(min_speed_mps + 0.1, max_speed_mps - 0.1)
     speed_amplitude = rng.uniform(0.18, 0.35)
     speed_period = rng.uniform(55.0, 95.0)
     speed_phase = rng.uniform(0.0, 2.0 * math.pi)
     drift_period = rng.uniform(30.0, 70.0)
     drift_phase = rng.uniform(0.0, 2.0 * math.pi)
+    # 起步热身与最后减速的长度随机化
+    ramp_up_s = rng.uniform(35.0, 60.0)
+    cool_down_m = rng.uniform(70.0, 110.0)
+    start_speed = rng.uniform(1.3, 1.9)
+    # 起点相位随机：每次沿路线的不同位置起跑
+    start_offset_m = rng.uniform(0.0, route.length_m)
 
     points: list[TrackPoint] = []
     # 官方样本的第一个点是一个占位点：t=0、速度/精度/里程全为 0。
-    start_lat, start_lon, _ = route.point_at(0.0)
+    # 占位点和实际起点用同一相位，否则两点会被一条横跨全场的直线连起来。
+    start_lat, start_lon, _ = route.point_at(start_offset_m)
     points.append(
         TrackPoint(
             a=_round_coord(start_lat),
@@ -262,17 +272,27 @@ def generate_route_record(
     previous_ms = start_ms
 
     while cumulative < target_distance_m:
-        speed = (
+        remaining = target_distance_m - cumulative
+        cruise = (
             base_speed
             + speed_amplitude * math.sin(2.0 * math.pi * elapsed_s / speed_period + speed_phase)
             + rng.gauss(0.0, 0.05)
         )
-        speed = min(max(speed, min_speed_mps), max_speed_mps)
-        interval = 1.0 + rng.uniform(-0.05, 0.05)
+        if elapsed_s - first_fix_delay_s < ramp_up_s:
+            # 起步：慢走热身后线性升到巡航（真实样本起步 3~4 km/h）
+            progress = (elapsed_s - first_fix_delay_s) / ramp_up_s
+            speed = start_speed + (cruise - start_speed) * progress
+            speed = min(speed, max_speed_mps)
+        elif remaining < cool_down_m:
+            # 最后一段逐渐减速停下
+            speed = max(0.9, cruise * max(0.35, remaining / cool_down_m))
+        else:
+            speed = min(max(cruise, min_speed_mps), max_speed_mps)
+        interval = sample_interval_s + rng.uniform(-0.04, 0.04)
         step = speed * interval
         travelled += step
 
-        lat, lon, bearing = route.point_at(travelled)
+        lat, lon, bearing = route.point_at(travelled + start_offset_m)
         # 横向缓慢漂移：真人不会严格贴着一条数学折线跑。
         lateral = 0.7 * math.sin(2.0 * math.pi * elapsed_s / drift_period + drift_phase)
         radial = math.radians(bearing)
@@ -287,12 +307,16 @@ def generate_route_record(
             reported = speed
         else:
             segment = haversine_distance_m(previous_lat, previous_lon, lat, lon)
-            # 定位速度以真实坐标位移为准，只叠加 1–2 % 定位噪声。这样
-            # ``avgSpeed == Σd / activeTime`` 与逐点 ``s`` 天然一致。
+            # 定位速度以真实坐标位移为准。GPS 瞬时速度本身噪声很大
+            # （真样本点速 sd 约 3 km/h），叠加 12% 高斯噪声并截尾。
             measured = segment / max(0.2, (point_ms - previous_ms) / 1000.0)
-            reported = measured * rng.uniform(0.985, 1.015)
+            reported = max(0.3, measured * rng.gauss(1.0, 0.12))
         cumulative += segment
-        accuracy = round(rng.uniform(min_accuracy_m, max_accuracy_m), 1)
+        # 定位精度呈长尾分布（真样本均值约 4m，偶尔漂到 50~100m）
+        accuracy = round(
+            min(max_accuracy_m, max(min_accuracy_m, math.exp(rng.gauss(1.44, 0.5)))),
+            1,
+        )
         points.append(
             TrackPoint(
                 a=lat,
