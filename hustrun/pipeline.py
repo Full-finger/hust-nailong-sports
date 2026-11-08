@@ -50,6 +50,7 @@ from .generator import (
 from .http_client import (
     probe_server_time,
     request_in_sport_time,
+    request_sport_list,
     request_sports_id,
     upload_savesports,
     upload_sensor_zip,
@@ -790,3 +791,18 @@ def check_session(config_path: str = "config.yaml", progress: Optional[Progress]
                 )
             )
     return out
+
+
+def fetch_sport_records(config_path: str = "config.yaml") -> dict:
+    """拉取服务端已有运动记录（只读）。
+
+    返回 {"records": [...], "message": ""}；失败时 records 为空并带原因。
+    """
+    auth = load_auth_config(config_path)
+    if not auth.token or not auth.secret:
+        return {"records": [], "message": "缺少 TOKEN/SECRET，先 python -m hustrun login"}
+    with open_signer(config_path) as signer:
+        result = request_sport_list(auth, signer)
+        if not result.ok:
+            return {"records": [], "message": result.message}
+        return {"records": result.records, "message": ""}

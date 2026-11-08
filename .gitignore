@@ -27,6 +27,8 @@ decoded-real/
 decompiled-java/
 .tools/
 venv/
+output/
+card_*.png
 
 # ---- Python ----
 __pycache__/

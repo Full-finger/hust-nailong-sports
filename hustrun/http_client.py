@@ -9,7 +9,7 @@ import re
 import hashlib
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Mapping, Optional
 from urllib.parse import urlencode
 
@@ -56,6 +56,20 @@ class SportsIdResult:
     @property
     def ok(self) -> bool:
         return bool(self.sport_id)
+
+
+@dataclass
+class SportListResult:
+    """服务端已有运动记录列表（只读查询）。"""
+
+    records: list = field(default_factory=list)
+    http_status: int = 0
+    api_code: str = ""
+    message: str = ""
+
+    @property
+    def ok(self) -> bool:
+        return self.api_code == "200"
 
 
 # ============================================================
@@ -369,6 +383,56 @@ def request_sports_id(
         result.message = "sportsId 响应缺少有效 ID"
         return result
     result.sport_id = value.strip()
+    return result
+
+
+def request_sport_list(
+    auth: AuthConfig,
+    signer: Optional[RequestSigner] = None,
+) -> SportListResult:
+    """查询服务端已有的运动记录列表（只读）。
+
+    对应运动记录页的 ``GET api/l/v6/sportlist?xh=<学号>``。路径取自 App
+    脱壳 dex（ExerciseRecordActivity 调用链），参数名与 ExerciseRecord-
+    Presenter 反汇编一致。
+    """
+    path = "/api/l/v6/sportlist"
+    query = {"xh": auth.xh}
+    url = f"{auth.server_url}{path}"
+    try:
+        headers = build_headers(
+            auth,
+            build_url_signing_target(path, query),
+            signer,
+        )
+    except ValueError as exc:
+        return SportListResult(message=str(exc))
+
+    try:
+        response = requests.get(url, params=query, headers=headers, timeout=15)
+    except requests.RequestException as exc:
+        return SportListResult(message=f"网络请求失败: {exc}")
+
+    result = SportListResult(http_status=response.status_code)
+    if response.status_code != 200:
+        result.message = _http_error_message(response)
+        return result
+    try:
+        body = response.json()
+    except (requests.JSONDecodeError, json.JSONDecodeError, ValueError):
+        result.message = "sportlist 返回 HTTP 200，但响应不是 JSON"
+        return result
+
+    ok, code, message = _api_status(body)
+    result.api_code = code
+    result.message = message
+    if not ok or not isinstance(body, dict):
+        return result
+    value = body.get("data")
+    if not isinstance(value, list):
+        result.message = "sportlist 响应缺少记录列表"
+        return result
+    result.records = value
     return result
 
 

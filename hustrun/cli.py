@@ -362,5 +362,108 @@ def list_routes(config: str) -> None:
             click.echo(f"{path.name:<24} 读取失败: {exc}")
 
 
+@main.command()
+@click.option("--config", "-c", default="config.yaml")
+@click.option("--valid", "valid_filter", default=None, help="按有效性过滤: 1 有效，-1 无效")
+@click.option("--limit", type=int, default=None, help="只显示最近 N 条")
+def records(config: str, valid_filter: str | None, limit: int | None) -> None:
+    """查看服务端已有的运动记录（只读）。"""
+    from .pipeline import fetch_sport_records
+
+    report = fetch_sport_records(config)
+    if report["message"]:
+        click.echo(f"✗ 查询失败: {report['message']}", err=True)
+        raise SystemExit(1)
+
+    recs = sorted(report["records"], key=lambda r: r.get("date") or "", reverse=True)
+    if valid_filter:
+        recs = [r for r in recs if str(r.get("isValid")) == valid_filter]
+
+    def fmt_duration(rec: dict) -> str:
+        value = rec.get("duration")
+        if value not in (None, ""):
+            try:
+                sec = int(float(value))
+                return f"{sec // 60}:{sec % 60:02d}"
+            except ValueError:
+                return str(value)
+        try:
+            sec = int((int(rec["endTime"]) - int(rec["beginTime"])) / 1000)
+            return f"{sec // 60}:{sec % 60:02d}"
+        except (KeyError, TypeError, ValueError):
+            return "-"
+
+    def fmt_pace(rec: dict) -> str:
+        parts = rec.get("paceStr") or []
+        return " ".join(p.get("t", "?") for p in parts) if parts else "-"
+
+    valid_n = sum(1 for r in recs if str(r.get("isValid")) == "1")
+    total_km = sum(
+        float(r.get("odometer") or 0) for r in recs if str(r.get("isValid")) == "1"
+    )
+    click.echo(f"共 {len(recs)} 条记录（有效 {valid_n} 条 / 有效里程 {total_km:.2f} km）\n")
+    header = (
+        f"{'日期':<20}{'距离km':>6}{'时长':>8}{'配速':>16}"
+        f"  {'状态':<10}{'审核':<6}{'sportId':<13}备注"
+    )
+    click.echo(header)
+    click.echo("-" * 84)
+    shown = recs if limit is None else recs[:limit]
+    valid_text = {"1": "有效", "-1": "无效", "0": "未判"}
+    check_text = {"1": "过审", "-2": "待审", "0": "未审"}
+    for rec in shown:
+        status = valid_text.get(str(rec.get("isValid")), str(rec.get("isValid")))
+        if rec.get("isValidReason"):
+            status += f"({rec['isValidReason']})"
+        check = check_text.get(str(rec.get("checkStatus")), str(rec.get("checkStatus")))
+        if rec.get("checkResult"):
+            check += f"({rec['checkResult']})"
+        click.echo(
+            f"{rec.get('date', ''):<20}{rec.get('odometer', '-'):>6}"
+            f"{fmt_duration(rec):>8}{fmt_pace(rec):>16}  {status:<10}{check:<6}"
+            f"{str(rec.get('sportId', ''))[:12]:<13}{rec.get('tip') or ''}"
+        )
+
+
+@main.command()
+@click.option("--config", "-c", default="config.yaml")
+@click.option("--sport-id", "sport_id", default=None, help="要渲染的记录 sportId（默认取最新一条）")
+@click.option("--out", "-o", "output", default=None, help="输出 PNG 路径（默认 output/card_<日期>.png）")
+def card(config: str, sport_id: str | None, output: str | None) -> None:
+    """把一条运动记录渲染成分享卡片（PNG）。"""
+    from .card import render_card
+    from .pipeline import fetch_sport_records
+
+    report = fetch_sport_records(config)
+    if report["message"]:
+        click.echo(f"✗ 查询失败: {report['message']}", err=True)
+        raise SystemExit(1)
+
+    recs = sorted(report["records"], key=lambda r: r.get("date") or "", reverse=True)
+    if not recs:
+        click.echo("✗ 服务端没有运动记录", err=True)
+        raise SystemExit(1)
+
+    record = None
+    if sport_id:
+        for rec in recs:
+            if str(rec.get("sportId", "")).startswith(sport_id):
+                record = rec
+                break
+        if record is None:
+            click.echo(f"✗ 找不到 sportId 前缀为 {sport_id} 的记录", err=True)
+            raise SystemExit(1)
+    else:
+        record = recs[0]
+
+    total_km = sum(
+        float(r.get("odometer") or 0) for r in recs if str(r.get("isValid")) == "1"
+    )
+    default_name = f"card_{(record.get('date') or 'record')[:10].replace('-', '')}.png"
+    out_path = Path("output") / default_name if output is None else Path(output)
+    saved = render_card(record, total_km, out_path)
+    click.echo(f"✓ 已生成 {saved}  ({record.get('date', '')} {record.get('odometer', '-')}km)")
+
+
 if __name__ == "__main__":
     main()
