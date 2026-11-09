@@ -240,6 +240,11 @@ def generate_route_record(
     speed_phase = rng.uniform(0.0, 2.0 * math.pi)
     drift_period = rng.uniform(30.0, 70.0)
     drift_phase = rng.uniform(0.0, 2.0 * math.pi)
+    # 逐次生成的路线形变：模拟每次跑不同车道/漂移模式。以弧长为自变量，
+    # 同一跑道位置本次生成内偏移一致（环仍是环），不同生成之间形状不同。
+    route_morph_amp = rng.uniform(1.2, 2.6)
+    route_morph_period = rng.uniform(120.0, 320.0)
+    route_morph_phase = rng.uniform(0.0, 2.0 * math.pi)
     # 起步热身与最后减速的长度随机化
     ramp_up_s = rng.uniform(35.0, 60.0)
     cool_down_m = rng.uniform(70.0, 110.0)
@@ -293,12 +298,19 @@ def generate_route_record(
         travelled += step
 
         lat, lon, bearing = route.point_at(travelled + start_offset_m)
-        # 横向缓慢漂移：真人不会严格贴着一条数学折线跑。
+        # 横向缓慢漂移：真人不会严格贴着一条数学折线跑。时间驱动的慢摆
+        # 之上，再叠加以弧长为自变量的逐次路线形变。
         lateral = 0.7 * math.sin(2.0 * math.pi * elapsed_s / drift_period + drift_phase)
+        lateral += route_morph_amp * math.sin(
+            2.0 * math.pi * travelled / route_morph_period + route_morph_phase
+        )
         radial = math.radians(bearing)
         north = -math.sin(radial) * lateral
         east = math.cos(radial) * lateral
         lat, lon = _offset_meters(lat, lon, north, east)
+        # GPS 散布：真人逐点带 1~2m 高频噪声，纯插值点会过于干净
+        lat += rng.gauss(0.0, 1.1) / _M_PER_DEG_LAT
+        lon += rng.gauss(0.0, 1.1) / (_M_PER_DEG_LAT * math.cos(math.radians(lat)))
         lat, lon = _round_coord(lat), _round_coord(lon)
 
         point_ms = start_ms + int(round(elapsed_s * 1000.0))
