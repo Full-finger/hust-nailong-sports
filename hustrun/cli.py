@@ -207,7 +207,7 @@ def check(config: str) -> None:
 
 @main.command()
 @click.option("--config", "-c", default="config.yaml")
-@click.option("--route", "-r", "route_path", required=True, help="路径 JSON")
+@click.option("--route", "-r", "route_path", default="config/routes/route_track.json", show_default=True, help="路径 JSON")
 @click.option("--distance", "-d", type=float, default=2150.0, help="目标距离（米）")
 @click.option("--seed", type=int, default=None)
 @click.option("--out", "output", default=None, help="把明文 payload 写到文件")
@@ -235,7 +235,7 @@ def generate(
 
 @main.command()
 @click.option("--config", "-c", default="config.yaml")
-@click.option("--route", "-r", "route_path", required=True, help="路径 JSON")
+@click.option("--route", "-r", "route_path", default="config/routes/route_track.json", show_default=True, help="路径 JSON")
 @click.option("--distance", "-d", type=float, default=2150.0, help="目标距离（米）")
 @click.option("--seed", type=int, default=None)
 @click.option(
@@ -279,7 +279,7 @@ def upload(
 
 @main.command()
 @click.option("--config", "-c", default="config.yaml")
-@click.option("--route", "-r", "route_path", required=True, help="路径 JSON")
+@click.option("--route", "-r", "route_path", default="config/routes/route_track.json", show_default=True, help="路径 JSON")
 @click.option("--distance", "-d", type=float, default=2150.0, help="目标距离（米）")
 @click.option("--seed", type=int, default=None)
 @click.option(
