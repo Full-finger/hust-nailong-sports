@@ -314,7 +314,14 @@ def prepare(
     if not report.session_path:
         click.echo(f"✗ 准备失败: {report.result.raw_response}", err=True)
         raise SystemExit(1)
+    draft_path = _write_draft(
+        report.session_path,
+        report.server_sport_id,
+        distance,
+        route_path,
+    )
     click.echo(f"✓ 已准备 session={report.session_path}")
+    click.echo(f"✓ 待提交清单 output/records/draft/{draft_path.name}")
     raise SystemExit(0)
 
 
@@ -330,8 +337,9 @@ def submit(
     output: str | None,
 ) -> None:
     """第二步：提交 prepare 落盘的 session。"""
-    from .pipeline import submit_session
+    from .pipeline import latest_session, submit_session
 
+    resolved = session_path or str(latest_session() or "")
     report = submit_session(
         config,
         session_path,
@@ -339,6 +347,8 @@ def submit(
         output_payload=output,
         progress=click.echo,
     )
+    if report.result.success:
+        _remove_draft(resolved)
     if report.record is not None:
         click.echo(
             f"[记录] {report.record.start_date} → {report.record.end_date} "
@@ -362,6 +372,73 @@ def list_routes(config: str) -> None:
             click.echo(f"{path.name:<24} 读取失败: {exc}")
 
 
+def _bucket_of(rec: dict) -> str:
+    """按服务端状态分桶：approved / rejected / pending。"""
+    if str(rec.get("isValid")) == "-1":
+        return "rejected"
+    if str(rec.get("isValid")) == "1" and str(rec.get("checkStatus")) == "1":
+        return "approved"
+    return "pending"
+
+
+def _sync_record_dirs(records: list[dict]) -> dict[str, int]:
+    """全量重建 output/records/{approved,rejected,pending}/，每条一个 JSON。"""
+    import shutil
+
+    buckets: dict[str, list[dict]] = {"approved": [], "rejected": [], "pending": []}
+    for rec in records:
+        buckets[_bucket_of(rec)].append(rec)
+    base = Path("output") / "records"
+    for name, items in buckets.items():
+        dir_path = base / name
+        if dir_path.exists():
+            shutil.rmtree(dir_path)
+        dir_path.mkdir(parents=True, exist_ok=True)
+        for rec in items:
+            stamp = (
+                (rec.get("date") or "unknown").replace("-", "").replace(":", "").replace(" ", "_")
+            )
+            fname = f"{stamp}_{str(rec.get('sportId', ''))[:8]}.json"
+            (dir_path / fname).write_text(
+                json.dumps(rec, ensure_ascii=False, indent=1), encoding="utf-8"
+            )
+    return {k: len(v) for k, v in buckets.items()}
+
+
+def _write_draft(session_path: str, sport_id: str, distance: float, route_path: str) -> Path:
+    """prepare 落盘后在 draft/ 写摘要；submit 成功后移除。"""
+    from datetime import datetime
+
+    draft_dir = Path("output") / "records" / "draft"
+    draft_dir.mkdir(parents=True, exist_ok=True)
+    fname = (
+        f"prepare_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{sport_id[:8]}.json"
+    )
+    payload = {
+        "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "sport_id": sport_id,
+        "session": session_path,
+        "distance": distance,
+        "route": route_path,
+    }
+    path = draft_dir / fname
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8")
+    return path
+
+
+def _remove_draft(session_path: str | None) -> None:
+    """submit 成功后移除对应 draft 摘要。"""
+    draft_dir = Path("output") / "records" / "draft"
+    if not (session_path and draft_dir.exists()):
+        return
+    for f in draft_dir.glob("*.json"):
+        try:
+            if json.loads(f.read_text(encoding="utf-8")).get("session") == session_path:
+                f.unlink()
+        except Exception:  # noqa: BLE001 - 摘要损坏不影响主流程
+            continue
+
+
 @main.command()
 @click.option("--config", "-c", default="config.yaml")
 @click.option("--valid", "valid_filter", default=None, help="按有效性过滤: 1 有效，-1 无效")
@@ -369,8 +446,6 @@ def list_routes(config: str) -> None:
 @click.option("--out", "-o", "output", default=None, help="把原始记录数据存为 JSON（未过滤前的全量）")
 def records(config: str, valid_filter: str | None, limit: int | None, output: str | None) -> None:
     """查看服务端已有的运动记录（只读）。"""
-    import json
-
     from .pipeline import fetch_sport_records
 
     report = fetch_sport_records(config)
@@ -378,7 +453,13 @@ def records(config: str, valid_filter: str | None, limit: int | None, output: st
         click.echo(f"✗ 查询失败: {report['message']}", err=True)
         raise SystemExit(1)
 
-    recs = sorted(report["records"], key=lambda r: r.get("date") or "", reverse=True)
+    counts = _sync_record_dirs(report["records"])
+    click.echo(
+        "[分拣] 已过审 "
+        + f"{counts['approved']} / 待审核 {counts['pending']} / 无效 {counts['rejected']}"
+        + " → output/records/"
+    )
+
     if output:
         out_path = Path(output)
         out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -387,6 +468,8 @@ def records(config: str, valid_filter: str | None, limit: int | None, output: st
             encoding="utf-8",
         )
         click.echo(f"[导出] {len(report['records'])} 条原始记录 → {out_path}")
+
+    recs = sorted(report["records"], key=lambda r: r.get("date") or "", reverse=True)
     if valid_filter:
         recs = [r for r in recs if str(r.get("isValid")) == valid_filter]
 
@@ -471,7 +554,7 @@ def card(config: str, sport_id: str | None, output: str | None) -> None:
         float(r.get("odometer") or 0) for r in recs if str(r.get("isValid")) == "1"
     )
     default_name = f"card_{(record.get('date') or 'record')[:10].replace('-', '')}.png"
-    out_path = Path("output") / default_name if output is None else Path(output)
+    out_path = Path("output") / "cards" / default_name if output is None else Path(output)
     saved = render_card(record, total_km, out_path)
     click.echo(f"✓ 已生成 {saved}  ({record.get('date', '')} {record.get('odometer', '-')}km)")
 
