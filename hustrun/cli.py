@@ -366,8 +366,11 @@ def list_routes(config: str) -> None:
 @click.option("--config", "-c", default="config.yaml")
 @click.option("--valid", "valid_filter", default=None, help="按有效性过滤: 1 有效，-1 无效")
 @click.option("--limit", type=int, default=None, help="只显示最近 N 条")
-def records(config: str, valid_filter: str | None, limit: int | None) -> None:
+@click.option("--out", "-o", "output", default=None, help="把原始记录数据存为 JSON（未过滤前的全量）")
+def records(config: str, valid_filter: str | None, limit: int | None, output: str | None) -> None:
     """查看服务端已有的运动记录（只读）。"""
+    import json
+
     from .pipeline import fetch_sport_records
 
     report = fetch_sport_records(config)
@@ -376,6 +379,14 @@ def records(config: str, valid_filter: str | None, limit: int | None) -> None:
         raise SystemExit(1)
 
     recs = sorted(report["records"], key=lambda r: r.get("date") or "", reverse=True)
+    if output:
+        out_path = Path(output)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(
+            json.dumps(report["records"], ensure_ascii=False, indent=1),
+            encoding="utf-8",
+        )
+        click.echo(f"[导出] {len(report['records'])} 条原始记录 → {out_path}")
     if valid_filter:
         recs = [r for r in recs if str(r.get("isValid")) == valid_filter]
 
