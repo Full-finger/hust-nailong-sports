@@ -311,19 +311,17 @@ def render_card(record: dict, total_valid_km: float, out_path: str | Path) -> Pa
         if sec is not None:
             pass
     secs = [s for _, _, s in parsed if s is not None]
-    sec_min, sec_max = (min(secs), max(secs)) if secs else (0, 0)
+    sec_max = max(secs) if secs else 0
     bar_x0 = 150
-    bar_x1_max = CARD_W - 190  # 右侧留配速文本
-    bar_w_min = 200
+    bar_w_max = CARD_W - 190 - bar_x0
     for i, (km, label, sec) in enumerate(parsed):
         ry = y + 58 + i * PACE_ROW_H
         _text(draw, (40, ry), f"{km} km", 26, COLOR_TEXT_MAIN, anchor="lm")
-        if sec is None or sec_max == sec_min:
-            width = bar_w_min
+        if sec is None or sec_max == 0:
+            width = bar_w_max * 0.8
         else:
-            # 越快（秒数越小）条越长
-            ratio = 1 - (sec - sec_min) / (sec_max - sec_min)
-            width = bar_w_min + ratio * (bar_x1_max - bar_x0 - bar_w_min)
+            # 条长 ∝ 该公里耗时（单纯按时间长短，最慢的满条）
+            width = bar_w_max * (sec / sec_max)
         _draw_bar(draw, bar_x0, bar_x0 + width, ry, 12, BAR_START, BAR_END)
         _text(draw, (CARD_W - 40, ry), label, 28, COLOR_TEXT_MAIN, anchor="rm")
 

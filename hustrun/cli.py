@@ -553,10 +553,13 @@ def card(config: str, sport_id: str | None, output: str | None) -> None:
     total_km = sum(
         float(r.get("odometer") or 0) for r in recs if str(r.get("isValid")) == "1"
     )
-    default_name = f"card_{(record.get('date') or 'record')[:10].replace('-', '')}.png"
+    # 文件名与展示优先用运动时刻（beginTime）：补传时服务端 date 是提交日，
+    # 会和卡片上显示的跑步日期不一致
+    stamp_src = record.get("beginTime") or record.get("date") or "record"
+    default_name = f"card_{stamp_src[:10].replace('-', '')}.png"
     out_path = Path("output") / "cards" / default_name if output is None else Path(output)
     saved = render_card(record, total_km, out_path)
-    click.echo(f"✓ 已生成 {saved}  ({record.get('date', '')} {record.get('odometer', '-')}km)")
+    click.echo(f"✓ 已生成 {saved}  ({stamp_src[:16]} {record.get('odometer', '-')}km)")
 
 
 if __name__ == "__main__":
