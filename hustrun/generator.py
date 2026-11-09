@@ -249,6 +249,9 @@ def generate_route_record(
     ramp_up_s = rng.uniform(35.0, 60.0)
     cool_down_m = rng.uniform(70.0, 110.0)
     start_speed = rng.uniform(1.3, 1.9)
+    # GPS 误差 AR(1) 相关噪声：误差缓慢游走而非逐点独立乱跳（真人毛刺中位约 0.6m）
+    gps_lat_noise = 0.0
+    gps_lon_noise = 0.0
     # 起点相位随机：每次沿路线的不同位置起跑
     start_offset_m = rng.uniform(0.0, route.length_m)
 
@@ -308,9 +311,12 @@ def generate_route_record(
         north = -math.sin(radial) * lateral
         east = math.cos(radial) * lateral
         lat, lon = _offset_meters(lat, lon, north, east)
-        # GPS 散布：真人逐点带 1~2m 高频噪声，纯插值点会过于干净
-        lat += rng.gauss(0.0, 1.1) / _M_PER_DEG_LAT
-        lon += rng.gauss(0.0, 1.1) / (_M_PER_DEG_LAT * math.cos(math.radians(lat)))
+        # GPS 散布：AR(1) 相关噪声，稳态约 0.7m，相邻点强相关，
+        # 带长程缓慢游走（多径/星历误差的真实行为）
+        gps_lat_noise = 0.9 * gps_lat_noise + rng.gauss(0.0, 0.3)
+        gps_lon_noise = 0.9 * gps_lon_noise + rng.gauss(0.0, 0.3)
+        lat += gps_lat_noise / _M_PER_DEG_LAT
+        lon += gps_lon_noise / (_M_PER_DEG_LAT * math.cos(math.radians(lat)))
         lat, lon = _round_coord(lat), _round_coord(lon)
 
         point_ms = start_ms + int(round(elapsed_s * 1000.0))
