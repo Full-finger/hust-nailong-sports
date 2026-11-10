@@ -7,6 +7,7 @@ import os
 import sys
 import tempfile
 import xml.etree.ElementTree as ET
+from datetime import datetime
 from pathlib import Path
 
 import click
@@ -469,7 +470,11 @@ def records(config: str, valid_filter: str | None, limit: int | None, output: st
         )
         click.echo(f"[导出] {len(report['records'])} 条原始记录 → {out_path}")
 
-    recs = sorted(report["records"], key=lambda r: r.get("date") or "", reverse=True)
+    recs = sorted(
+        report["records"],
+        key=lambda r: r.get("beginTime") or r.get("date") or "",
+        reverse=True,
+    )
     if valid_filter:
         recs = [r for r in recs if str(r.get("isValid")) == valid_filter]
 
@@ -481,15 +486,33 @@ def records(config: str, valid_filter: str | None, limit: int | None, output: st
                 return f"{sec // 60}:{sec % 60:02d}"
             except ValueError:
                 return str(value)
+        begin, end = rec.get("beginTime"), rec.get("endTime")
+        if isinstance(begin, str) and isinstance(end, str):
+            try:
+                sec = int(
+                    (
+                        datetime.fromisoformat(end) - datetime.fromisoformat(begin)
+                    ).total_seconds()
+                )
+                return f"{sec // 60}:{sec % 60:02d}"
+            except ValueError:
+                pass
         try:
             sec = int((int(rec["endTime"]) - int(rec["beginTime"])) / 1000)
             return f"{sec // 60}:{sec % 60:02d}"
         except (KeyError, TypeError, ValueError):
             return "-"
 
-    def fmt_pace(rec: dict) -> str:
-        parts = rec.get("paceStr") or []
-        return " ".join(p.get("t", "?") for p in parts) if parts else "-"
+    def fmt_sport_time(rec: dict) -> str:
+        """运动起止时间，如 09-01 20:32~20:53；非今年记录带年份。"""
+        begin = str(rec.get("beginTime") or rec.get("date") or "")
+        end = str(rec.get("endTime") or "")
+        if len(begin) < 16:
+            return begin
+        date_part = begin[:10] if begin[:4] != str(datetime.now().year) else begin[5:10]
+        if len(end) >= 16:
+            return f"{date_part} {begin[11:16]}~{end[11:16]}"
+        return begin[:16]
 
     valid_n = sum(1 for r in recs if str(r.get("isValid")) == "1")
     total_km = sum(
@@ -497,7 +520,7 @@ def records(config: str, valid_filter: str | None, limit: int | None, output: st
     )
     click.echo(f"共 {len(recs)} 条记录（有效 {valid_n} 条 / 有效里程 {total_km:.2f} km）\n")
     header = (
-        f"{'日期':<20}{'距离km':>6}{'时长':>8}{'配速':>16}"
+        f"{'运动时间':<24}{'距离km':>6}{'时长':>8}"
         f"  {'状态':<10}{'审核':<6}{'sportId':<13}备注"
     )
     click.echo(header)
@@ -513,8 +536,8 @@ def records(config: str, valid_filter: str | None, limit: int | None, output: st
         if rec.get("checkResult"):
             check += f"({rec['checkResult']})"
         click.echo(
-            f"{rec.get('date', ''):<20}{rec.get('odometer', '-'):>6}"
-            f"{fmt_duration(rec):>8}{fmt_pace(rec):>16}  {status:<10}{check:<6}"
+            f"{fmt_sport_time(rec):<24}{rec.get('odometer', '-'):>6}"
+            f"{fmt_duration(rec):>8}  {status:<10}{check:<6}"
             f"{str(rec.get('sportId', ''))[:12]:<13}{rec.get('tip') or ''}"
         )
 
