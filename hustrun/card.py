@@ -41,6 +41,7 @@ CARD_W = 720
 TRACK_H = 480
 PACE_ROW_H = 52
 PACE_BLOCK_H = 100
+SPEED_H = 260
 
 TILE_SIZE = 256
 TILE_URL = (
@@ -240,12 +241,105 @@ def _draw_track(base: Image.Image, draw: ImageDraw.ImageDraw, box, points):
         _text(draw, pos, label, 18, "white", bold=True, anchor="mm")
 
 
+def _extract_speed_series(rec: dict) -> list[tuple[float, float]]:
+    """从轨迹点提取 (秒偏移, 速度 km/h)。
+
+    点的 t 混用 0 占位与 epoch 毫秒：首个点 t=0，之后是毫秒时间戳。
+    以首个非零 t 为基准换算秒偏移；有效时间戳过少时退回按序号铺开。
+    """
+    pts = [
+        p for p in (rec.get("coordinatestr") or [])
+        if p.get("s") is not None
+        and not (not p.get("t") and float(p["s"]) == 0)  # 首点占位：t=0 且 s=0
+    ]
+    if len(pts) < 2:
+        return []
+    ts = [p.get("t") or 0 for p in pts]
+    usable = sum(1 for t in ts if t > 0)
+    if usable >= len(pts) // 2:
+        t0 = min(t for t in ts if t > 0)
+        return [
+            (0.0 if t <= 0 else (t - t0) / 1000.0 + 1.0, float(p["s"]))
+            for t, p in zip(ts, pts)
+        ]
+    return [(float(i), float(p["s"])) for i, p in enumerate(pts)]
+
+
+def _draw_speed_chart(
+    draw: ImageDraw.ImageDraw, box, series: list[tuple[float, float]],
+):
+    """速度折线图：逐轨迹点 km/h，叠加均速参考虚线。
+
+    均速取轨迹点自身均值，与折线自洽；record 的 avgSpeed 可能按
+    不同时长口径计算，直接用会和曲线对不上。
+    """
+    x0, y0, x1, y1 = box
+    _text(draw, (40, y0 + 22), "速度 (km/h)", 30, COLOR_TEXT_MAIN,
+          bold=True, anchor="lm")
+    sub = f"逐点采样 · {len(series)}点"
+    _text(draw, (CARD_W - 40, y0 + 22), sub, 20, COLOR_TEXT_SUB, anchor="rm")
+
+    plot_x0, plot_x1 = x0 + 64, x1 - 40
+    plot_y0, plot_y1 = y0 + 56, y1 - 72
+    plot_w = max(1.0, plot_x1 - plot_x0)
+    plot_h = max(1.0, plot_y1 - plot_y0)
+
+    xs = [s for s, _ in series]
+    ys = [v for _, v in series]
+    t_max = max(xs) or 1.0
+    moving = [v for v in ys if v > 0]
+    avg_speed = sum(moving) / len(moving) if moving else None
+    top = max(max(ys), avg_speed or 0.0)
+    hi = top * 1.15 + 0.5
+
+    def sx(t: float) -> float:
+        return plot_x0 + t / t_max * plot_w
+
+    def sy(v: float) -> float:
+        return plot_y1 - v / hi * plot_h
+
+    # 横向网格 + 整数刻度
+    raw_step = hi / 3
+    step = 5 if raw_step > 3.5 else (2 if raw_step > 1.5 else 1)
+    v = step
+    while v < hi:
+        gy = sy(v)
+        draw.line([(plot_x0, gy), (plot_x1, gy)], fill=COLOR_MAP_GRID, width=1)
+        _text(draw, (plot_x0 - 10, gy), f"{v:.0f}", 16, COLOR_TEXT_LIGHT,
+              anchor="rm")
+        v += step
+
+    # 均速参考虚线
+    if avg_speed and avg_speed > 0:
+        gy = sy(avg_speed)
+        seg = 16
+        for gx in range(int(plot_x0), int(plot_x1), seg * 2):
+            draw.line([(gx, gy), (gx + seg, gy)], fill=COLOR_TRACK, width=2)
+        _text(draw, (plot_x1, gy - 14), f"均速 {avg_speed:.1f}", 16,
+              COLOR_TRACK, anchor="rm")
+
+    coords = [(sx(t), sy(s)) for t, s in series]
+    draw.line(coords, fill=COLOR_BLUE, width=2, joint="curve")
+
+    # x 轴时长标注
+    total = int(t_max)
+    _text(draw, (plot_x0, y1 - 50), "0:00", 16, COLOR_TEXT_LIGHT, anchor="lm")
+    _text(draw, (plot_x1, y1 - 50),
+          f"全程 {total // 60:02d}:{total % 60:02d}", 16,
+          COLOR_TEXT_LIGHT, anchor="rm")
+
+
 def render_card(record: dict, total_valid_km: float, out_path: str | Path) -> Path:
-    """把一条记录渲染成 PNG 卡片。total_valid_km 为累计有效里程。"""
+    """把一条记录渲染成 PNG 卡片。total_valid_km 为累计有效里程。
+
+    轨迹点带速度时，在配速条下方追加速度折线图。
+    """
     rec = record
     pace_list = rec.get("paceStr") or []
 
-    card_h = 370 + TRACK_H + PACE_BLOCK_H + PACE_ROW_H * len(pace_list)
+    speed_series = _extract_speed_series(rec)
+    chart_block = SPEED_H if speed_series else 0
+    card_h = 370 + TRACK_H + PACE_BLOCK_H + PACE_ROW_H * len(pace_list) + chart_block
     image = Image.new("RGB", (CARD_W, card_h), "white")
     draw = ImageDraw.Draw(image)
 
@@ -324,6 +418,14 @@ def render_card(record: dict, total_valid_km: float, out_path: str | Path) -> Pa
             width = bar_w_max * (sec / sec_max)
         _draw_bar(draw, bar_x0, bar_x0 + width, ry, 12, BAR_START, BAR_END)
         _text(draw, (CARD_W - 40, ry), label, 28, COLOR_TEXT_MAIN, anchor="rm")
+
+    # ---- 速度 ----
+    if speed_series:
+        y_chart = 370 + TRACK_H + PACE_BLOCK_H + PACE_ROW_H * len(pace_list)
+        _draw_speed_chart(
+            draw, (0, y_chart, CARD_W, y_chart + SPEED_H),
+            speed_series,
+        )
 
     # ---- 页脚 ----
     footer_y = card_h - 26
